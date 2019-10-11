@@ -1,0 +1,3248 @@
+
+#include "line_sensors.h"
+#include "irproximity.h"
+#include "mapping.h"
+#include "RF_Interface.h"
+#include <Wire.h>
+#include "imu.h"
+#include "magnetometer.h"
+#include "Pushbutton.h"
+#define L_PWM_PIN 10
+#define L_DIR_PIN 16
+#define R_PWM_PIN  9
+#define R_DIR_PIN 15
+
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+   Definitions.  Other definitions exist in the .h files above.
+   Also ensure you check pins.h for pin/device definitions.
+ *                                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+#define BAUD_RATE 9600
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+   Class Instances.
+   This list is complete for all devices supported in this code.
+ *                                                                               *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+Kinematics    Pose; //Kinematics class to store position and heading
+
+LineSensor    LineLeft(LINE_LEFT_PIN); //Left line sensor
+LineSensor    LineCentre(A3); //Centre line sensor
+LineSensor    LineRight(LINE_RIGHT_PIN); //Right line sensor
+
+SharpIR  dis_media(A1);
+SharpIR  dis_left(A0);
+SharpIR  dis_right(A4);
+
+Imu           Imu;
+
+Magnetometer  Mag; // Class for the magnetometer
+
+Motor         LeftMotor(10, 16);
+Motor         RightMotor(9, 15);
+
+PID           LeftSpeedControl( 3.5, 20.9, 0.04 );
+PID           RightSpeedControl( 3.5, 20.9, 0.04 );
+PID           HeadingControl( 10, 10, 0.01 );
+
+Mapper        Map; //Class for representing the map
+
+Pushbutton    ButtonB( BUTTON_B, DEFAULT_STATE_HIGH);
+
+bool use_speed_controller = true;
+float left_speed_demand;
+float right_speed_demand;
+
+float dirxy, dis_x, dis_y, dis_disxy;
+int state;
+float pi = 3.1415926;
+float last_count_l, last_count_r;
+float l_speed, r_speed, value = 35;
+int last_count_left_location, last_count_right_location;
+float a, b;
+int n = 1;
+float p1;
+float theta_turn=90;
+float turn;
+float time_t;
+float dis_middle;
+float first_dis=10;
+float dis_med1=20,dis_left1=20,dis_right1=20;
+float last_Y;
+int obstacle_n=1;
+int back_n=1,tone_n;
+float IR_n=1,IR_s,IR_t;
+int parrallel_n=1;
+int line1,line2,line3;
+float a_1,b_1;
+
+void setup()
+{
+
+  setupLeftEncoder();
+  setupRightEncoder();
+  // startTimer();
+  
+  LeftSpeedControl.setMax(100);
+  RightSpeedControl.setMax(100);
+  pinMode( L_PWM_PIN, OUTPUT );
+  pinMode( L_DIR_PIN, OUTPUT );
+  pinMode( R_PWM_PIN, OUTPUT );
+  pinMode( R_DIR_PIN, OUTPUT );
+  digitalWrite( L_DIR_PIN, LOW  );
+  digitalWrite( R_DIR_PIN, LOW );
+  // For this example, we'll calibrate only the
+  // centre sensor.  You may wish to use more.
+  LineCentre.calibrate();
+  setupRFID();
+
+  // These functions calibrate the IMU and Magnetometer
+  // The magnetometer calibration routine require you to move
+  // your robot around  in space.
+  // The IMU calibration requires the Romi does not move.
+  // See related lab sheets for more information.
+  /*
+    Wire.begin();
+    Mag.init();
+    Mag.calibrate();
+    Imu.init();
+    Imu.calibrate();
+  */
+
+  // Set the random seed for the random number generator
+  // from A0, which should itself be quite random.
+  randomSeed(analogRead(A0));
+
+
+  Serial.begin( BAUD_RATE );
+  Serial.println("Board Reset");
+
+  ButtonB.waitForButton();
+  Map.printMap();
+  ButtonB.waitForButton();
+  Serial.println("Map Erased - Mapping Started");
+  Map.resetMap();
+
+  LeftSpeedControl.reset();
+  RightSpeedControl.reset();
+  left_speed_demand = 5;
+  right_speed_demand = 5;
+  //setupTimer3();
+  delay(1000);
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+   This loop() demonstrates all devices being used in a basic sequence.
+   The Romi should:
+   - move forwards with random turns
+   - log lines, RFID and obstacles to the map.
+
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void loop() {
+  dis_media.calibrate();
+  dis_left.calibrate();
+  dis_right.calibrate();
+    detect_distance();
+  linesensor();
+  Pose.update();
+  printall();
+  doMapping();
+  turn=Pose.getThetaDegrees();
+
+
+  switch (state)
+  {
+    case 0: {
+       if(dis_med1<=10||dis_left1<=10){
+         state=8;
+         last_count_l = left_encoder_count;
+         last_count_r = right_encoder_count;        
+          }
+        forward_go();
+        border();
+
+      }
+      break;
+
+    case 1: {
+        record_count();
+      }
+      break;
+
+    case 2: {
+        smallforward_parrallel();
+        parrallel_n+=1;
+      }
+      break;
+
+    case 3: {
+        turn_left_90();
+
+      }
+      break;
+
+    case 4: {
+        turn_right_90();
+      }
+      break;
+
+    case 5: {
+        forward_back();
+        border();
+       if(dis_med1<=10||dis_left1<=10){
+         state=10;
+         last_count_l = left_encoder_count;
+         last_count_r = right_encoder_count;
+          }
+
+      }
+      break;
+      
+    case 6: {
+
+        smallforward_vertical();
+      }
+      break;
+
+    case 7: {
+        xun_obstacle_go();
+      }
+      break;
+      
+    case 8: {
+      obstacle_left_turn_go();
+      }
+      break;
+      
+    case 9: {
+        xun_obstacle_back();
+      }
+      break;    
+
+   case 10: {
+        obstacle_left_turn_back();
+      }
+      break; 
+
+   case 11: {
+        meet_obstacle_go();
+      }
+      break; 
+
+   case 12: {
+        meet_obstacle_back();
+      }
+      break; 
+
+   case 13: {
+        play_tone(6,300);
+        state=14;
+        
+      }
+      break; 
+
+   case 14: {
+      LeftMotor.setPower(0);
+      RightMotor.setPower(0);
+      }
+      break;
+      
+        
+  }
+  delay(1);
+
+}
+
+void forward_go() {
+  float differ;
+  float dir_last;
+  differ=Pose.getThetaDegrees()*0.1;
+  if(differ>=30){
+    differ=30;
+    }
+  l_speed = value + differ;
+  r_speed = value - differ;
+  LeftMotor.setPower(l_speed);
+  RightMotor.setPower(r_speed);
+}
+
+void forward_back() {
+  float differ;
+  float dir_last;
+  if(Pose.getThetaDegrees()>=0){
+    differ=abs(Pose.getThetaDegrees()-180)*1;
+    if(differ>=30){
+        differ=30;
+        }
+    l_speed = value - differ;
+    r_speed = value + differ;
+    }
+  else{
+    differ=abs(Pose.getThetaDegrees()+180)*1;
+    if(differ>=30){
+        differ=30;
+        }
+    l_speed = value + differ;
+    r_speed = value - differ;
+    }
+  LeftMotor.setPower(l_speed);
+  RightMotor.setPower(r_speed);
+}
+
+void smallforward_parrallel() {
+  float differ;
+  differ = (Pose.getThetaDegrees()-90) * 1;
+        if(differ>=12){
+        differ=12;
+        }
+  l_speed = 25 + differ;
+  r_speed = 25 - differ;
+  if (((left_encoder_count-last_count_l)+(right_encoder_count-last_count_r))/2<=947)
+  { LeftMotor.setPower(l_speed);
+    RightMotor.setPower(r_speed);
+  }
+  else {
+    state = 1;
+    n += 1;
+    LeftMotor.setPower(0);
+    RightMotor.setPower(0); 
+  }
+}
+
+void smallforward_vertical() {
+  float differ;
+  float i;
+  if(Pose.getThetaDegrees()<=30&&Pose.getThetaDegrees()>=-30){
+      i=0;
+    }
+    else{
+      if(Pose.getThetaDegrees()>=90){
+          i=180;
+      }
+      else{
+          i=-180;
+           }
+      }
+      differ = (Pose.getThetaDegrees()-i) * 1;
+      if(differ>=10){
+        differ=10;
+        }
+      l_speed = 25 + differ;
+      r_speed = 25 - differ;
+  if (millis()-time_t<=700)
+       { LeftMotor.setPower(l_speed);
+         RightMotor.setPower(r_speed);
+       } 
+  else {
+         state = 1;
+         n += 1;  
+       }
+ 
+  if (n == 11) {
+      n = 1;
+      state = 1;
+    }
+}
+
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+   This function groups up our sensor checks, and then
+   encodes into the map.  To get you started, we are
+   simply placing a character into the map.  However,
+   you might want to look using a bitwise scheme to
+   encode more information.  Take a look at mapping.h
+   for more information on how we are reading and
+   writing to eeprom memory.
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+void doMapping() {
+  map_obstacle();
+  // Read the IR Sensor and determine distance in
+  // mm.  Make sure you calibrate your own code!
+  // We threshold a reading between 40mm and 12mm.
+  // The rationale being:
+  // We can't trust very close readings or very far.
+  // ...but feel free to investigate this.
+  Map.updateMapFeature( (byte)'X', Pose.getY(), Pose.getX() );
+  float distancem = dis_media.getDistanceLeftInMM();
+  if ( distancem < 12 && distancem > 6 ) {
+    // We know the romi has the sensor mounted
+    // to the front of the robot.  Therefore, the
+    // sensor faces along Pose.Theta.
+    // We also add on the distance of the
+    // sensor away from the centre of the robot.
+    distancem += 9;
+
+
+    // Here we calculate the actual position of the obstacle we have detected
+    float projected_x = Pose.getX() + ( distancem * cos( Pose.getThetaRadians() ) );
+    float projected_y = Pose.getY() + ( distancem * sin( Pose.getThetaRadians() ) );
+    Map.updateMapFeature( (byte)'O', projected_y, projected_x );
+  }
+
+
+  
+
+  // Check RFID scanner.
+  // Look inside RF_interface.h for more info.
+  if ( checkForRFID() ) {
+
+    // Add card to map encoding.
+    Map.updateMapFeature( (byte)'R', Pose.getY(), Pose.getX() );
+
+    // you can check the position reference and
+    // bearing information of the RFID Card in
+    // the following way:
+    // serialToBearing( rfid.serNum[0] );
+    // serialToXPos( rfid.serNum[0] );
+    // serialToYPos( rfid.serNum[0] );
+    //
+    // Note, that, you will need to set the x,y
+    // and bearing information in rfid.h for your
+    // experiment setup.  For the experiment days,
+    // we will tell you the serial number and x y
+    // bearing information for the cards in use.
+
+  }
+
+  // Basic uncalibrated check for a line.
+  // Students can do better than this after CW1 ;)
+  if ( line2 > 400 || line3 > 400 ) {
+    Map.updateMapFeature( (byte)'L', Pose.getY(), Pose.getX() );
+  }
+}
+
+//void location() {
+//  if (dirxy >= 180.01)
+//  {
+//    dirxy = -180;
+//  }
+//  if (dirxy <= -180.01) {
+//    dirxy = 180;
+//  }
+//  last_count_left_location = left_encoder_count;
+//  last_count_right_location = right_encoder_count;
+//}
+
+
+void turn_left_90()
+{   float differ;
+  if ((right_encoder_count-last_count_r)<=700)
+  {
+     LeftMotor.setPower(-20);
+     RightMotor.setPower(20);
+  }
+  else {
+    state = 1;
+    n += 1;
+    theta_turn+=90;}
+  if (theta_turn==270){
+    theta_turn=90;
+    }
+  
+}
+
+void turn_right_90()
+{ float differ;
+  if (abs(left_encoder_count-last_count_l)<=700)
+  {
+     LeftMotor.setPower(20);
+     RightMotor.setPower(-20);
+  }
+  else  {
+    state = 1;
+    n += 1;
+    theta_turn-=90;}
+  if (theta_turn==-90)
+  {
+    theta_turn=90;
+    }
+}
+
+void record_count() {
+  time_t=millis();
+  last_count_l = left_encoder_count;
+  last_count_r = right_encoder_count;
+  if ( n == 1) {
+    state = 0;
+  }
+  if (n == 2||n==4 ) {
+    state = 3;
+  }
+  
+  if (n == 3 || n == 8) {
+    state = 2;
+  }
+  if (n == 5 || n == 10) {
+    state = 6;
+  }
+  if (n == 7 || n == 9) {
+    state = 4;
+  }
+  if (n == 6) {
+    state = 5;
+  }
+
+}
+
+void printall() {
+//  Serial.print(line1);
+//  Serial.print(" ,");
+//    Serial.print(line2);
+//  Serial.print(" ,");
+//    Serial.println(line3);
+  
+//    Pose.printPose();
+//    Serial.print(LineCentre.readRaw());
+//    Serial.print(last_Y);
+//    Serial.print(" ,");
+//    Serial.print(" back_n:");
+//    Serial.print(back_n);
+//    Serial.print(" PoseY-lastY:");
+//    Serial.print((Pose.getY()-last_Y));
+//    Serial.println(dis_middle);
+    Serial.print(dis_left1);
+    Serial.print(" ,");
+    Serial.print(dis_med1);  
+    Serial.print(" ,");
+    Serial.println(dis_right1);
+//    Serial.print(" ,");
+//    Serial.print(analogRead(A4));  
+//    Serial.print(" obstacle_n:");
+//    Serial.print(obstacle_n);
+//      Serial.print(" state: ");
+//      Serial.println(state);
+ //   Serial.print(" ,n:");
+ //   Serial.print(n);
+ //   Serial.print(" ,millis:");
+ //   Serial.print(millis());
+ //   Serial.print(" ,time_t:");
+  //  Serial.print(time_t);
+//  Serial.print(left_encoder_count);
+//  Serial.print(" ,right_count:");
+//  Serial.println(right_encoder_count);
+//   Serial.print(" ,turn:");
+//   Serial.print(turn);
+ //   Serial.print(" ,theta_turn:");
+//    Serial.println(theta_turn);
+//  Serial.print(dis_x);
+//  Serial.print(", ");
+//  Serial.print(dis_y);
+//  Serial.print(", ");
+//  Serial.println(dirxy);
+//  Serial.println(" ");
+//Serial.println(state);
+}
+
+void border() {
+  if (Pose.getX() > 1550 || Pose.getX() < 0) 
+  {
+    state = 1;
+    n += 1;
+  }
+  //if ((Pose.getX() > 1400&&Pose.getY() > 1400)||(Pose.getX() < 500&&Pose.getY() > 1400)){
+  if (Pose.getY() > 1400){
+    state=13;
+    } 
+}
+
+void xun_obstacle_go()                                    //state==7
+{
+  float second_dis = dis_right1;
+  float differ=(second_dis-first_dis)*2;
+  if (differ>=8){
+    differ=8;
+    }
+  float output_left  = 25+differ;
+  float output_right = 25-differ; 
+
+  if(output_right<=20){
+    output_right=20;
+    }
+    if(output_left>=35){
+    output_right=35;
+    }
+    
+  if(dis_med1<=12){
+     last_count_l = left_encoder_count;
+     last_count_r = right_encoder_count;
+     state=11;
+    }
+
+  if((Pose.getY()-last_Y)>=-5){
+     LeftMotor.setPower(output_left);
+     RightMotor.setPower(output_right);}
+  else{
+     state=8;
+     last_count_l = left_encoder_count;
+     last_count_r = right_encoder_count;
+      }
+  }
+
+void xun_obstacle_back()                                    //state==9
+{
+  float second_dis = dis_right1;
+  float differ=(second_dis-first_dis)*2;
+  if (differ>=8){
+    differ=8;
+    }
+  float output_left  = 25+differ;
+  float output_right = 25-differ;  
+  if(output_right<=20){
+    output_right=20;
+    }
+    if(output_left>=35){
+    output_right=35;
+    }
+  if(dis_med1<=12){
+     last_count_l = left_encoder_count;
+     last_count_r = right_encoder_count;
+     state=12;
+    }
+
+  if((Pose.getY()-last_Y)<=10){
+     LeftMotor.setPower(output_left);
+     RightMotor.setPower(output_right);}
+  else{
+     state=10;
+     last_count_l = left_encoder_count;
+     last_count_r = right_encoder_count;
+      }
+  }
+   
+void detect_distance(){
+   dis_med1    = dis_media.getDistanceMiddleInMM();
+   dis_left1   = dis_left.getDistanceLeftInMM();
+   dis_right1  = dis_right.getDistanceRightInMM();
+  }
+
+void obstacle_left_turn_go(){                                //state==8
+ float differ;
+  if ((-last_count_r + right_encoder_count)<=780)
+  {
+     LeftMotor.setPower(-20);
+     RightMotor.setPower(20);
+  }
+  else {
+    state=7;
+    obstacle_n+=1;
+    last_Y=Pose.getY();
+    } 
+  if (obstacle_n==3){
+    obstacle_n=1;
+    state=0;
+    }  
+  }
+
+void obstacle_left_turn_back(){                                //state==10
+ float differ;
+  if ((-last_count_r + right_encoder_count)<=780)
+  {
+     LeftMotor.setPower(-20);
+     RightMotor.setPower(20);
+  }
+  else {
+    last_Y=Pose.getY();
+    back_n+=1;
+    state=9;
+    }
+
+  if(back_n==3){
+    back_n=1;  
+    state=5;
+    }
+  }  
+
+void meet_obstacle_go(){
+    if ((-last_count_r + right_encoder_count)<=400)
+  {
+     LeftMotor.setPower(-20);
+     RightMotor.setPower(20);
+  }
+  else {
+    state=7;
+    LeftMotor.setPower(0);
+    RightMotor.setPower(0);
+    }
+  }
+
+void meet_obstacle_back(){
+    if ((-last_count_r + right_encoder_count)<=400)
+  {
+     LeftMotor.setPower(-20);
+     RightMotor.setPower(20);
+  }
+  else {
+    state=9;
+    LeftMotor.setPower(0);
+    RightMotor.setPower(0);
+    }
+  }
+
+void play_tone(int volume, int duration){
+  analogWrite(6,volume);
+  delay(duration);
+  analogWrite(6,0);
+  delay(duration);
+  tone_n += 1;
+  if (tone_n>=2)
+  {
+  analogWrite(6,0);
+  }
+  }
+
+void linesensor(){
+   line2=analogRead(A3);
+   line3=analogRead(A2);
+  }
+
+void map_obstacle(){
+    if(dis_right1<15){
+       dis_right1+=9;
+      if(turn<=85&&turn>=-85){     
+        float map_r_go_Y = Pose.getY()-(dis_right1*cos(turn));
+        float map_r_go_X = Pose.getX()+ dis_right1*sin(turn);
+        Map.updateMapFeature( (byte)'O', map_r_go_Y, map_r_go_X); 
+      }
+      if(turn>=95||turn<=-95){
+        float map_r_back_Y1 = Pose.getY()-(dis_right1*cos(turn));
+        float map_r_back_X1 = Pose.getX()-dis_right1*sin(turn);    
+        Map.updateMapFeature( (byte)'O', map_r_back_Y1, map_r_back_X1 ); 
+      }
+    }
+  }
+
+ISR(TIMER3_COMPA_vect){
+    dirxy = (right_encoder_count-left_encoder_count)/14;
+      if (dirxy >= 180.01)
+  {
+    dirxy = -180;
+  }
+  if (dirxy <= -180.01) {
+    dirxy = 180;
+  }
+    a_1=left_encoder_count-last_count_left;
+    b_1=right_encoder_count-last_count_right;
+    dis_x +=(a_1+b_1)*cos(dirxy*pi/180)/2;
+    dis_y +=(a_1+b_1)*sin(dirxy*pi/180)/2;
+    dis_disxy = sqrt(dis_x*dis_x+dis_y*dis_y);
+
+    last_count_left=left_encoder_count;
+    last_count_right=right_encoder_count;
+    }
+
+//void setupTimer3() {  
+//  cli();          
+//  TCCR3A = 0;     // set entire TCCR3A register to 0
+//  TCCR3B = 0;     // set entire TCCR3B register to 0
+//  TCCR3B = TCCR3B | (1 << WGM32);
+//  TCCR3B = TCCR3B | (1 << CS32); 
+//  OCR3A = 625;  
+//  TIMSK3 = TIMSK3 | (1 << OCIE3A);
+//  sei(); 
+//}
+
+#ifndef _IMU_h
+#define _IMU_h
+
+#include <LSM6.h>
+
+const int NUM_CALIBRATIONS_IMU = 100;
+
+class Imu
+{
+    public:
+        void init();
+        void  readRaw();
+        void  readCalibrated();
+        void  calibrate();
+        LSM6 imu;
+        float ax = 0;
+        float ay = 0;
+        float az = 0;
+        float gx = 0;
+        float gy = 0;
+        float gz = 0;
+
+    private:
+        float a_sensitivity = 0.061;
+        float g_sensitivity = 8.75;
+        float gx_offset = 0;
+        float gy_offset = 0;
+        float gz_offset = 0;
+
+
+};
+
+void Imu::init()
+{
+    if (!imu.init())
+    {
+        Serial.println("Failed to detect and initialize magnetometer!");
+        while (1);
+    }
+
+    imu.enableDefault();
+}
+
+void Imu::readRaw()
+{
+  
+  imu.read();
+  
+  gx = imu.g.x;
+  gy = imu.g.y;
+  gz = imu.g.z;
+
+  ax = imu.a.x;
+  ay = imu.a.y;
+  az = imu.a.z;
+  
+}
+
+void Imu::readCalibrated()
+{
+
+  imu.read();
+  
+  gx = g_sensitivity * (imu.g.x - gx_offset);
+  gy = g_sensitivity * (imu.g.y - gy_offset);
+  gz = g_sensitivity * (imu.g.z - gz_offset);
+
+  ax = a_sensitivity * imu.a.x;
+  ay = a_sensitivity * imu.a.y;
+  az = a_sensitivity * imu.a.z;
+
+ 
+ 
+  
+}
+
+void Imu::calibrate()
+{
+
+  for (int i=0;i<NUM_CALIBRATIONS_IMU;i++)
+  {
+    //analogWrite(BUZZER_PIN, 10);
+    delay(50);
+    
+    imu.read();
+
+    gx_offset += ((float)imu.g.x / NUM_CALIBRATIONS_IMU);
+    gy_offset += ((float)imu.g.y / NUM_CALIBRATIONS_IMU);
+    gz_offset += ((float)imu.g.z / NUM_CALIBRATIONS_IMU);
+    analogWrite(BUZZER_PIN, 0);
+    delay(50);
+  }
+
+   analogWrite(BUZZER_PIN, 10);
+  delay(500);
+  digitalWrite( BUZZER_PIN, LOW );
+  delay(500);
+  analogWrite(BUZZER_PIN, 10);
+  delay(500);
+  digitalWrite( BUZZER_PIN, LOW );
+  delay(500);
+
+  
+}
+
+
+
+
+#endif
+
+
+// Volatile Global variables used by Encoder ISR.
+volatile long left_encoder_count; // used by encoder to count the rotation
+volatile bool old_left_A;  // used by encoder to remember prior state of A
+volatile bool old_left_B;  // used by encoder to remember prior state of B
+volatile long last_count_left;
+volatile float left_speed;
+
+volatile long right_encoder_count; // used by encoder to count the rotation
+volatile bool old_right_A;  // used by encoder to remember prior state of A
+volatile bool old_right_B;  // used by encoder to remember prior state of B
+volatile long last_count_right;
+volatile float right_speed;
+
+
+
+
+
+
+
+// extern tells this class that these
+// are declared as globals else where
+extern bool   use_speed_controller;
+extern float left_speed_demand;
+extern float right_speed_demand;
+extern PID    LeftSpeedControl;
+extern PID    RightSpeedControl;
+extern Motor  LeftMotor;
+extern Motor  RightMotor;
+
+
+// This ISR handles just Encoder 1
+// ISR to read the Encoder1 Channel A and B pins
+// and then look up based on  transition what kind of
+// rotation must have occured.
+ISR( INT6_vect ) 
+{
+  // First, Read in the new state of the encoder pins.
+    // Standard pins, so standard read functions.
+    boolean new_e_right_B = digitalRead( ENCODER_RIGHT_B_PIN );
+    boolean new_e_right_A = digitalRead( ENCODER_RIGHT_A_PIN );
+
+    // Some clever electronics combines the
+    // signals and this XOR restores the
+    // true value.
+    new_e_right_A ^= new_e_right_B;
+
+    // Create a bitwise representation of our states
+    // We do this by shifting the boolean value up by
+    // the appropriate number of bits, as per our table
+    // header:
+    //
+    // State :  (bit3)  (bit2)  (bit1)  (bit0)
+    // State :  New A,  New B,  Old A,  Old B.
+    byte state = 0;
+    state = state | ( new_e_right_A  << 3 );
+    state = state | ( new_e_right_B  << 2 );
+    state = state | ( old_right_A  << 1 );
+    state = state | ( old_right_B  << 0 );
+
+
+    // This is an inefficient way of determining
+    // the direction.  However it illustrates well
+    // against the lecture slides.
+    switch( state ) 
+    {
+        case 0:     break; // No movement.
+        case 1:     right_encoder_count--; break;  // clockwise?
+        case 2:     right_encoder_count++; break;  // anti-clockwise?
+        case 3:     break;  // Invalid
+        case 4:     right_encoder_count++; break; // anti-clockwise?
+        case 5:     break;  // No movement.
+        case 6:     break;  // Invalid
+        case 7:     right_encoder_count--; break;  // clockwise?
+        case 8:     right_encoder_count--; break; // clockwise?
+        case 9:     break;  // Invalid
+        case 10:    break;  // No movement.
+        case 11:    right_encoder_count++; break; // anti-clockwise?
+        case 12:    break;  // Invalid
+        case 13:    right_encoder_count++; break; // anti-clockwise?
+        case 14:    right_encoder_count--; break;  // clockwise?
+        case 15:    break;  // No movement.
+    }
+
+    // Save current state as old state for next call.
+    old_right_A = new_e_right_A;
+    old_right_B = new_e_right_B;
+
+}
+
+
+// This ISR handles just Encoder 0
+// ISR to read the Encoder0 Channel A and B pins
+// and then look up based on  transition what kind of
+// rotation must have occured.
+
+
+ISR( PCINT0_vect ) {
+ 
+    // First, Read in the new state of the encoder pins.
+
+    // Mask for a specific pin from the port.
+    // Non-standard pin, so we access the register
+    // directly.  
+    // Reading just PINE would give us a number
+    // composed of all 8 bits.  We want only bit 2.
+    // B00000100 masks out all but bit 2
+    boolean new_e_left_B = PINE & (1<<PINE2);
+    //boolean new_e_right_B = PINE & B00000100;  // Does same as above.
+
+    // Standard read fro the other pin.
+    boolean new_e_left_A = digitalRead( ENCODER_LEFT_A_PIN ); // 26 the same as A8
+
+    // Some clever electronics combines the
+    // signals and this XOR restores the 
+    // true value.
+    new_e_left_A ^= new_e_left_B;
+
+    // Create a bitwise representation of our states
+    // We do this by shifting the boolean value up by
+    // the appropriate number of bits, as per our table
+    // header:
+    //
+    // State :  (bit3)  (bit2)  (bit1)  (bit0)
+    // State :  New A,  New B,  Old A,  Old B.
+    byte state = 0;                   
+    state = state | ( new_e_left_A  << 3 );
+    state = state | ( new_e_left_B  << 2 );
+    state = state | ( old_left_A  << 1 );
+    state = state | ( old_left_B  << 0 );
+
+    // This is an inefficient way of determining
+    // the direction.  However it illustrates well
+    // against the lecture slides.  
+    switch ( state ) 
+    {
+        case 0:    break; // No movement.
+        case 1:    left_encoder_count--; break;  // clockwise?
+        case 2:    left_encoder_count++; break;  // anti-clockwise?
+        case 3:    break;  // Invalid
+        case 4:    left_encoder_count++; break;  // anti-clockwise?
+        case 5:    break;  // No movement.
+        case 6:    break;  // Invalid
+        case 7:    left_encoder_count--; break;// clockwise?
+        case 8:    left_encoder_count--; break;  // clockwise?
+        case 9:    break;  // Invalid
+        case 10:   break;  // No movement.
+        case 11:   left_encoder_count++; break;// anti-clockwise?
+        case 12:   break;  // Invalid
+        case 13:   left_encoder_count++; break;// anti-clockwise?
+        case 14:   left_encoder_count--;  break;// clockwise?
+        case 15:   break;  // No movement.
+    }
+  
+     
+    // Save current state as old state for next call.
+    old_left_A = new_e_left_A;
+    old_left_B = new_e_left_B; 
+}
+
+
+/*
+   This setup routine enables interrupts for
+   encoder1.  The interrupt is automatically
+   triggered when one of the encoder pin changes.
+   This is really convenient!  It means we don't
+   have to check the encoder manually.
+*/
+void setupRightEncoder() 
+{
+
+    // Initialise our count value to 0.
+    right_encoder_count = 0;
+    last_count_right = 0;
+    right_speed = 0;
+
+    // Initialise the prior A & B signals
+    // to zero, we don't know what they were.
+    old_right_A = 0;
+    old_right_B = 0;
+
+    // Setup pins for right encoder 
+    pinMode( ENCODER_RIGHT_A_PIN, INPUT );
+    pinMode( ENCODER_RIGHT_B_PIN, INPUT );
+
+    // Now to set up PE6 as an external interupt (INT6), which means it can
+    // have its own dedicated ISR vector INT6_vector
+
+    // Page 90, 11.1.3 External Interrupt Mask Register – EIMSK
+    // Disable external interrupts for INT6 first
+    // Set INT6 bit low, preserve other bits
+    EIMSK = EIMSK & ~(1<<INT6);
+    //EIMSK = EIMSK & B1011111; // Same as above.
+  
+    // Page 89, 11.1.2 External Interrupt Control Register B – EICRB
+    // Used to set up INT6 interrupt
+    EICRB |= ( 1 << ISC60 );  // using header file names, push 1 to bit ISC60
+    //EICRB |= B00010000; // does same as above
+
+    // Page 90, 11.1.4 External Interrupt Flag Register – EIFR
+    // Setting a 1 in bit 6 (INTF6) clears the interrupt flag.
+    EIFR |= ( 1 << INTF6 );
+    //EIFR |= B01000000;  // same as above
+
+    // Now that we have set INT6 interrupt up, we can enable
+    // the interrupt to happen
+    // Page 90, 11.1.3 External Interrupt Mask Register – EIMSK
+    // Disable external interrupts for INT6 first
+    // Set INT6 bit high, preserve other bits
+    EIMSK |= ( 1 << INT6 );
+    //EIMSK |= B01000000; // Same as above
+
+}
+
+void setupLeftEncoder() 
+{
+
+    // Initialise our count value to 0.
+    left_encoder_count = 0;
+    last_count_left = 0;
+    left_speed = 0;
+    // Initialise the prior A & B signals
+    // to zero, we don't know what they were.
+    old_left_A = 0;
+    old_left_B = 0;
+
+    // Setting up left encoder:
+    // The Romi board uses the pin PE2 (port E, pin 2) which is
+    // very unconventional.  It doesn't have a standard
+    // arduino alias (like d6, or a5, for example).
+    // We set it up here with direct register access
+    // Writing a 0 to a DDR sets as input
+    // DDRE = Data Direction Register (Port)E
+    // We want pin PE2, which means bit 2 (counting from 0)
+    // PE Register bits [ 7  6  5  4  3  2  1  0 ]
+    // Binary mask      [ 1  1  1  1  1  0  1  1 ]
+    //    
+    // By performing an & here, the 0 sets low, all 1's preserve
+    // any previous state.
+    DDRE = DDRE & ~(1<<DDE6);
+    //DDRE = DDRE & B11111011; // Same as above. 
+
+    // We need to enable the pull up resistor for the pin
+    // To do this, once a pin is set to input (as above)
+    // You write a 1 to the bit in the output register
+    PORTE = PORTE | (1 << PORTE2 );
+    //PORTE = PORTE | 0B00000100;
+
+    // Encoder0 uses conventional pin 26
+    pinMode( ENCODER_LEFT_A_PIN, INPUT );
+    digitalWrite( ENCODER_LEFT_A_PIN, HIGH ); // Encoder 0 xor
+
+    // Enable pin-change interrupt on A8 (PB4) for encoder0, and disable other
+    // pin-change interrupts.
+    // Note, this register will normally create an interrupt a change to any pins
+    // on the port, but we use PCMSK0 to set it only for PCINT4 which is A8 (PB4)
+    // When we set these registers, the compiler will now look for a routine called
+    // ISR( PCINT0_vect ) when it detects a change on the pin.  PCINT0 seems like a
+    // mismatch to PCINT4, however there is only the one vector servicing a change
+    // to all PCINT0->7 pins.
+    // See Manual 11.1.5 Pin Change Interrupt Control Register - PCICR
+    
+    // Page 91, 11.1.5, Pin Change Interrupt Control Register 
+    // Disable interrupt first
+    PCICR = PCICR & ~( 1 << PCIE0 );
+    // PCICR &= B11111110;  // Same as above
+    
+    // 11.1.7 Pin Change Mask Register 0 – PCMSK0
+    PCMSK0 |= (1 << PCINT4);
+    
+    // Page 91, 11.1.6 Pin Change Interrupt Flag Register – PCIFR
+    PCIFR |= (1 << PCIF0);  // Clear its interrupt flag by writing a 1.
+
+    // Enable
+    PCICR |= (1 << PCIE0);
+}
+
+//This starts a 100Hz timer interrupt.
+//void startTimer()
+//{
+//    // Clear Timer 3 registers
+//    TCCR3A = 0;
+//    TCCR3B = 0;
+//    TCNT3 = 0;
+//
+//    // 100 Hz (16000000/((624+1)*256))
+//    OCR3A = 624;
+//    // CTC
+//    TCCR3B |= (1 << WGM32);
+//    // Prescaler 256
+//    TCCR3B |= (1 << CS32);
+//    // Output Compare Match A Interrupt Enable
+//    TIMSK3 |= (1 << OCIE3A);
+//}
+//
+//ISR(TIMER3_COMPA_vect)
+//{
+//
+//    /*
+//     * Calculate Speeds
+//     */
+//    signed int left_delta = left_encoder_count - last_count_left;
+//    signed int right_delta = right_encoder_count - last_count_right;
+//
+//    last_count_left = left_encoder_count;
+//    last_count_right = right_encoder_count;
+//
+//    left_speed =  left_delta;
+//    right_speed = right_delta;
+//
+//    if (use_speed_controller)
+//    {
+//        float left_motor_demand = LeftSpeedControl.update(left_speed_demand, left_speed);
+//        float right_motor_demand = RightSpeedControl.update(right_speed_demand, right_speed);
+//      
+//        LeftMotor.setPower(left_motor_demand);
+//        RightMotor.setPower(right_motor_demand);
+//    }
+//}
+
+#ifndef _IRProximity_h
+#define _IRProximity_h
+#define   E    2.718282 
+class SharpIR
+{
+    public:
+        SharpIR(byte pin);
+        int    getDistanceRaw();
+        float  getDistanceMiddleInMM();
+        void   calibrate();
+        float  getDistanceLeftInMM();
+        float  getDistanceRightInMM();
+        void   print_component();
+
+
+    private:
+        byte pin;
+        float a=0;
+        float b=0;
+        float average=0;
+};
+
+SharpIR::SharpIR(byte _pin)
+{
+  pin = _pin;
+}
+
+int SharpIR::getDistanceRaw()
+{
+    return analogRead(pin);
+}
+
+void SharpIR::calibrate()
+{
+   for(int i=0;i<50;i=i+1)
+   {
+    a= analogRead(pin);
+    b = b+a ;
+   }
+  average= b/50;
+  b=0;
+}
+
+
+float SharpIR::getDistanceMiddleInMM()
+{
+    
+    float distance = average;
+    
+    // map this to 0 : 5v range.
+    distance = distance*0.0048;
+
+    const float exponent = (1/-0.739);
+    distance = pow( ( distance / 18.626), exponent); //
+       
+    return distance;
+}
+
+float SharpIR::getDistanceLeftInMM()
+{
+    
+    float distance = average;
+    
+    // map this to 0 : 5v range.
+    distance = distance*0.0048;
+
+    const float exponent = (1/-0.776);
+    distance = pow( ( distance / 21.159), exponent); //
+       
+    return distance;
+}
+
+float SharpIR::getDistanceRightInMM()
+{
+    
+    float distance = average;
+    
+    // map this to 0 : 5v range.
+     distance = distance*0.0048;
+   const float exponent = (1/-0.776);
+   distance = pow( ( distance / 21.159), exponent); 
+
+       
+    return distance;
+}
+
+
+#endif
+
+#ifndef _Kinematics
+#define _Kinematics_h
+
+
+#define GEAR_RATIO 120.0
+#define COUNTS_PER_SHAFT_REVOLUTION 12.0
+const float WHEEL_RADIUS = 35.0;
+const float WHEEL_SEPARATION = 139;
+const float COUNTS_PER_WHEEL_REVOLUTION = GEAR_RATIO * COUNTS_PER_SHAFT_REVOLUTION;
+const float MM_PER_COUNT = ( 2 * WHEEL_RADIUS * PI ) / COUNTS_PER_WHEEL_REVOLUTION;
+
+class Kinematics
+{
+     public:
+
+         void  update();
+         float getThetaDegrees();
+         float getThetaRadians();
+         float getX();
+         float getY();
+         void  resetPose();
+         void  setPose(float X, float Y, float theta);
+         void  printPose();
+         void  setDebug(bool state);
+         float getDistanceFromOrigin();
+         float getAngularVelocity();
+        
+    private:
+
+         float x=0;
+         float y=0;
+         float theta=0;
+         float last_theta = 0;
+         float angular_velocity = 0;
+         long  last_left_encoder_count = 0;
+         long  last_right_encoder_count = 0;
+         bool  debug=false;
+         unsigned long last_update = 0;
+
+};
+
+
+void Kinematics::update()
+{
+    //Calculate delta since last update
+    float left_delta = (left_encoder_count - last_left_encoder_count)*MM_PER_COUNT;
+    float right_delta = (right_encoder_count - last_right_encoder_count)*MM_PER_COUNT;
+    float mean_delta = (left_delta + right_delta) / 2;  
+    
+    //Store counts
+    last_left_encoder_count = left_encoder_count;
+    last_right_encoder_count = right_encoder_count;  
+
+    //Update position
+    x+= mean_delta * cos(theta);
+    y+= mean_delta * sin(theta);
+    theta -=  (left_delta-right_delta) / (WHEEL_SEPARATION);  
+
+    float time_elapsed = millis() - last_update;
+    last_update = millis();
+
+    angular_velocity = ( (left_delta-right_delta) / WHEEL_SEPARATION );
+    angular_velocity -= last_theta;
+    angular_velocity /= time_elapsed;
+    
+
+    //Wrap theta between -PI and PI.
+    if (theta > PI)
+    {
+        theta -=2*PI;
+    }
+    else if(theta < -PI)
+    {
+        theta += 2*PI;
+    } 
+
+    last_theta = theta;
+
+    if (debug)
+    {
+        printPose();
+    }
+  
+}
+
+
+float Kinematics::getThetaDegrees()
+{
+    return rad2deg(theta);
+}
+float Kinematics::getThetaRadians()
+{
+    return (theta);
+}
+
+float Kinematics::getAngularVelocity() {
+    return rad2deg( angular_velocity );
+}
+
+
+float Kinematics::getX()
+{
+    return x;
+}
+
+
+float Kinematics::getY()
+{
+    return y;
+}
+
+
+void Kinematics::resetPose()
+{
+
+    x = 0;
+    y = 0;
+    theta = 0;
+
+}
+
+
+void Kinematics::setPose(float newX, float newY, float newTheta)
+{
+
+    x = newX;
+    y = newY;
+    theta = newTheta;
+
+}
+
+void Kinematics::printPose()
+{
+
+    Serial.print(F("X: "));
+    Serial.print(x);
+    Serial.print(F(" Y: "));
+    Serial.print(y);
+    Serial.print(F(" H: "));
+    Serial.println(rad2deg(theta));
+
+}
+
+
+void Kinematics::setDebug(bool state)
+{
+    debug = state;
+}
+
+
+float Kinematics::getDistanceFromOrigin()
+{
+    return sqrt(x*x + y*y);
+}
+
+#endif
+
+#ifndef _Line_follow_h
+#define _Line_follow_h
+
+const int NUM_CALIBRATIONS = 20;
+
+class LineSensor
+{
+    public:
+        LineSensor(int pin);
+        void calibrate();
+        int  readRaw();
+        float  readCalibrated();
+    
+    private:
+
+        float calibration_offset=0;
+        int pin;
+    
+};
+
+LineSensor::LineSensor(int line_pin)
+{
+
+    pin = line_pin;
+    pinMode(pin, INPUT);
+
+}
+
+
+int LineSensor::readRaw()
+{
+    return analogRead(pin);
+}
+
+
+void LineSensor::calibrate()
+{
+
+    //analogWrite(BUZZER_PIN, 255);
+
+    for (int i=0;i<NUM_CALIBRATIONS;i++)
+    {
+        calibration_offset += analogRead(pin);
+        delay(10);
+    }
+
+    calibration_offset =  calibration_offset / NUM_CALIBRATIONS;
+
+    analogWrite(BUZZER_PIN, 0);
+
+}
+
+float LineSensor::readCalibrated()
+{
+    return (analogRead(pin) - calibration_offset);
+}
+
+#endif
+
+#ifndef _Magentometer
+#define _Magentometer
+
+#include <LIS3MDL.h>
+
+const int NUM_CALIBRATIONS_MAG = 100;
+
+class Magnetometer
+{
+    public:
+        void init();
+        void  readRaw();
+        void  readCalibrated();
+        void  calibrate();
+        void  calculateOffsets();
+        void  set_sensitivity();
+        LIS3MDL mag;
+        float x = 0;
+        float y = 0;
+        float z = 0;
+
+    private:
+        float sensitivity = 6.842;
+        int x_min = 32767;
+        int y_min = 32767;
+        int z_min = 32767;
+        int x_max = -32768;
+        int y_max = -32768;
+        int z_max = -32768;
+        float x_offset = 0;
+        float y_offset = 0;
+        float z_offset = 0;
+        float x_scale = 0;
+        float y_scale = 0;
+        float z_scale = 0;
+
+};
+
+void Magnetometer::init()
+{
+    if (!mag.init())
+    {
+        Serial.println("Failed to detect and initialize magnetometer!");
+        while (1);
+    }
+
+    mag.enableDefault();
+}
+
+void Magnetometer::readRaw()
+{
+  
+  mag.read();
+  
+  x = mag.m.x;
+  y = mag.m.y;
+  z = mag.m.z;
+  
+}
+
+void Magnetometer::readCalibrated()
+{
+
+  mag.read();
+  
+  x = sensitivity * (mag.m.x - x_offset) * x_scale;
+  y = sensitivity * (mag.m.y - y_offset) * y_scale;
+  z = sensitivity * (mag.m.z - z_offset) * z_scale;
+  
+}
+
+void Magnetometer::calibrate()
+{
+    analogWrite(BUZZER_PIN, 10);
+    delay(50);analogWrite(BUZZER_PIN, 0);
+    delay(50);
+    analogWrite(BUZZER_PIN, 10);
+    delay(50);analogWrite(BUZZER_PIN, 0);
+    delay(50);
+    analogWrite(BUZZER_PIN, 10);
+    delay(50);analogWrite(BUZZER_PIN, 0);
+    delay(50);
+  for (int i=0;i<NUM_CALIBRATIONS_MAG;i++)
+  {
+    
+    mag.read();
+
+    x_max = max(x_max, mag.m.x);
+    y_max = max(y_max, mag.m.y);
+    z_max = max(z_max, mag.m.z);
+
+    x_min = min(x_min, mag.m.x);
+    y_min = min(y_min, mag.m.y);
+    z_min = min(z_min, mag.m.z);
+
+    delay(50);
+  }
+
+  calculateOffsets();
+
+  analogWrite(BUZZER_PIN, 10);
+  delay(500);
+  digitalWrite( BUZZER_PIN, LOW );
+  delay(500);
+  analogWrite(BUZZER_PIN, 10);
+  delay(500);
+  digitalWrite( BUZZER_PIN, LOW );
+  delay(500);
+  
+}
+
+void Magnetometer::calculateOffsets()
+{
+  
+  x_offset = (x_max + x_min) / 2;
+  y_offset = (y_max + y_min) / 2;
+  z_offset = (z_max + z_min) / 2;
+
+  x_scale = (x_max - x_min) / 2;
+  y_scale = (y_max - y_min) / 2;
+  z_scale = (z_max - z_min) / 2; 
+
+  float avg_scale = (x_scale + y_scale + z_scale) / 3;
+
+  x_scale = avg_scale / x_scale;
+  y_scale = avg_scale / y_scale;
+  z_scale = avg_scale / z_scale;
+
+  Serial.print("X: ");
+  Serial.print(x_offset);  
+  Serial.print("Y: ");
+  Serial.print(y_offset);
+  Serial.print("Z: ");
+  Serial.println(z_offset);
+  
+  Serial.print("X: ");
+  Serial.print(x_scale);  
+  Serial.print("Y: ");
+  Serial.print(y_scale);
+  Serial.print("Z: ");
+  Serial.println(z_scale);
+  
+}
+
+
+#endif
+
+#ifndef _Mapping_h
+#define _Mapping_h
+#include <EEPROM.h>
+
+const byte MAP_RESOLUTION = 25;
+const byte MAP_DEFAULT_FEATURE = '#';
+const int MAP_X=1550;
+const int MAP_Y=1400;
+
+class Mapper
+{
+    public:
+        void resetMap();
+        void printMap();
+        void updateMapFeature(byte feature, int y, int x);
+        void updateMapFeature(byte feature, float y, float x);
+        
+        int  indexToPose(int i, int map_size, int resolution);
+        int  poseToIndex(int x, int map_size, int resolution);
+    
+    private:
+        int X_size;
+        int Y_size;
+};
+
+void Mapper::resetMap()
+{
+
+    for (int i=0;i<MAP_RESOLUTION;i++)
+    {
+        for (int j=0;j<MAP_RESOLUTION;j++)
+        {
+            int eeprom_address = (i*MAP_RESOLUTION)+j;
+            
+            if (eeprom_address > 1023)
+            {
+                Serial.println(F("Error: EEPROM Address greater than 1023"));
+            }
+            else
+            {
+                EEPROM.update(eeprom_address, MAP_DEFAULT_FEATURE );
+                
+            }
+        }
+    }
+
+}
+
+void Mapper::printMap()
+{
+
+    Serial.println("Map");
+    for (int i=0;i<MAP_RESOLUTION;i++)
+    //for (int i=MAP_RESOLUTION;i>0;i--)
+    {
+        for(int j=0;j<MAP_RESOLUTION;j++)
+        //for(int j=MAP_RESOLUTION;j>0;j--)
+        {
+            int eeprom_address = (i*MAP_RESOLUTION)+j;
+            byte value;
+            value = EEPROM.read(eeprom_address);//, value);
+            Serial.print( (char)value );
+            Serial.print(" ");
+        }
+        Serial.println("");
+    }
+  
+}
+
+int Mapper::poseToIndex(int x, int map_size, int resolution)
+{
+    return x / (map_size / resolution);
+}
+
+int Mapper::indexToPose(int i, int map_size, int resolution)
+{
+    return i* (map_size / resolution);
+}
+
+
+void Mapper::updateMapFeature(byte feature, float y, float x) {
+  updateMapFeature( feature, (int)y, (int)x );  
+}
+
+void Mapper::updateMapFeature(byte feature, int y, int x)
+{
+    if (x > MAP_X || x < 0 || y > MAP_Y || y < 0)
+    {
+      //Serial.println(F("Error:Invalid co-ordinate"));
+      return;
+    }
+
+    int x_index = poseToIndex(x, MAP_X, MAP_RESOLUTION);
+    int y_index = poseToIndex(y, MAP_Y, MAP_RESOLUTION);  
+
+    int eeprom_address = (x_index * MAP_RESOLUTION) + y_index;  
+
+    if (eeprom_address > 1023)
+    {
+        Serial.println(F("Error: EEPROM Address greater than 1023"));
+    }
+    else
+    {
+        EEPROM.update(eeprom_address, feature);
+    }
+        
+
+}
+
+
+#endif
+
+#ifndef _Motor_h
+#define _Motor_h
+#include <stdint.h>
+
+//Pin definitions for motor
+
+const byte default_max_power = 255;
+const byte PWM_MAX = 255;
+
+class Motor
+{
+    public:
+
+        Motor(byte pwm, byte dir); //Constructor - stores pins for controlling the motor
+        void setPower(float demand); //Sets the duty factor of the PWM signal sent to the Motor's H-Bridge
+
+    private:
+
+        byte pwm_pin;
+        byte dir_pin;
+
+        float max_power=default_max_power;
+};
+
+
+Motor::Motor(byte pwm, byte dir)
+{
+
+    //store pin numbers
+    pwm_pin = pwm;
+    dir_pin = dir;
+
+    //set pins as outputs
+    pinMode(pwm_pin, OUTPUT);
+    pinMode(dir_pin, OUTPUT);
+
+    //set initial speed and direction
+    digitalWrite(pwm_pin, LOW);
+    digitalWrite(dir_pin, LOW);
+
+}
+
+
+void Motor::setPower(float demand)
+{
+    // Toggle direction based on sign of demand.
+    digitalWrite( dir_pin, demand < 0 ? HIGH : LOW );
+
+    // Write out absolute magnitude to pwm pin
+    demand = abs( demand );
+    demand = constrain( demand, 0, max_power );
+    analogWrite( pwm_pin, demand );
+}
+
+
+#endif
+
+
+#ifndef _PID_h
+#define _PID_h
+#include <stdint.h>
+
+/*Here, the definition of the PID class begins. This is indicated by the keyword: "class"
+This is a general description of the data and functions that the class contains. 
+To use a class, we must make a specific instance of the class by declaring it into the same way we declare a variable. 
+For example, to create a version of the PID class, in our main file we might write:
+
+PID LeftWheelPID;
+PID RightWheelPID;
+
+This will create two instances of the PID class; one for the left wheel and one for the right wheel. 
+Each class will have a full copy of all the variables and functions defined for that particular class.
+*/ 
+
+class PID
+{
+    /* Public functions and variables are defined here. A public function / variable can be accessed from outside 
+     * the class. 
+     * For example, once we have made an instance of the PID class, we can call the update function by writing:
+     * 
+     * LeftWheelPID.update();
+     * 
+     * Note that this will only update the LeftWheelPID - RightWheelPID will not be updated unless we also call 
+     * RightWheelPID.update()
+     */
+    public:
+
+        PID(float P, float D, float I); // This is the class constructor. It is called whenever we create an instance of the PID class 
+        void  setGains(float P, float D, float I); // This function updates the values of the gains
+        void  reset(); //This function resets any stored values used by the integral or derative terms
+        float update(float demand, float measurement); //This function calculates the PID control signal. It should be called in a loop
+        void  printComponents(); //This function prints the individual components of the control signal and can be used for debugging
+        void  setMax(float  new_max); //This function sets the maximum output the controller can ask for
+        void  setDebug(bool state); //This function sets the debug flag;
+        void  printResponse(); // This function prints the ratio of input to output in a way that is nicely interpreted by the Serial plotter
+        void  setShowResponse(bool state); //This functions set the show_response flag
+        
+    /* Private functions and variables are defined here. These functions / variables cannot be accessed from outside the class.
+     * For example, if we try to set the value of Kp in the file "Romi.h", we will get an error (Try it out!) 
+     */
+    private:
+
+        //Control gains
+        float Kp; //Proportional
+        float Ki; //Integral
+        float Kd; //Derivative
+
+        //We can use this to limit the output to a certain value
+        float max_output=255; 
+
+        //Output components
+        //These are used for debugging purposes
+        float Kp_output=0; 
+        float Ki_output=0;
+        float Kd_output=0;
+        float total=0;
+
+        //Values to store
+        float last_demand=0; //For storing the previous input
+        float last_measurement=0; //For storing the last measurement
+        float last_error=0; //For calculating the derivative term
+        float integral_error=0; //For storing the integral of the error
+        long  last_millis = 0;
+        bool  debug=false; //This flag controls whether we print the contributions of each component when update is called
+        bool  show_response = false; // This flag controls whether we print the response of the controller on each update
+    
+};
+
+
+/*
+ * Class constructor
+ * This runs whenever we create an instance of the class
+ */
+ PID::PID(float P, float D, float I)
+{
+    //Store the gains
+    setGains(P, D, I);
+    //Set last_millis
+    last_millis = millis();
+}
+
+
+
+
+/*
+ * This function prints the individual contributions to the total contol signal
+ * You can call this yourself for debugging purposes, or set the debug flag to true to have it called
+ * whenever the update function is called.
+ */
+void PID::printComponents()
+{
+    Serial.print(F(" Proportional component: "));
+    Serial.print(Kp_output);
+    Serial.print(F(" Differential component: "));
+    Serial.print(Kd_output);
+    Serial.print(F(" Integral component: "));
+    Serial.print(Ki_output);
+    Serial.print(F(" Total: "));
+    Serial.println(total);
+}
+
+
+/*
+ * This function sets the gains of the PID controller
+ */
+void PID::setGains(float P, float D, float I)
+{
+    Kp = P;
+    Kd = D;
+    Ki = I;
+}
+
+
+/*
+ * This is the update function. 
+ * This function should be called repeatedly. 
+ * It takes a measurement of a particular variable (ex. Position, speed, heading) and a desired value for that quantity as input
+ * It returns an output; this can be sent directly to the motors, 
+ * combined with other control outputs
+ * or sent as input to another controller
+ */
+float PID::update(float demand, float measurement)
+{
+    //Calculate how much time (in milliseconds) has passed since the last update call
+    long time_now = millis();
+    float time_delta = (float)(time_now - last_millis);
+    last_millis = time_now;  
+
+    //This represents the error term
+    float error = demand - measurement;
+    
+    //This represents the error derivative
+    float error_delta = (last_error - error) / time_delta;  
+
+    //Update storage
+    last_demand = demand;
+    last_measurement = measurement;
+    last_error = error;  
+    
+    integral_error += (error * time_delta);
+
+    //Calculate components
+    Kp_output = Kp*error;
+    Kd_output = Kd*error_delta;
+    Ki_output = Ki*integral_error;  
+
+    //Add the three components to get the total output
+    total = Kp_output + Kd_output + Ki_output;
+
+    //Make sure we don't exceed the maximum output
+    total = constrain( total, -max_output, max_output );
+
+    //Print debugging information if required
+    if (debug)
+    {
+        Serial.print(F("Error: "));
+        Serial.print(error);
+        Serial.print(F(" Error Delta:"));
+        Serial.print(error_delta);
+        Serial.print(F(" Error Integral:"));
+        Serial.print(integral_error);
+        printComponents();
+    }
+
+    //Print response if required
+    if (show_response)
+    {
+        printResponse();
+    }
+  
+    return total;
+}
+
+
+void PID::setMax(float new_max)
+{
+    if (new_max > 0)
+    {
+        max_output = new_max;
+    }
+    else
+    {
+        Serial.println(F("Max output must be positive"));
+    }
+}
+
+
+void PID::setDebug(bool state)
+{
+    debug = state;
+}
+
+
+void PID::reset()
+{
+  
+    last_error = 0;
+    integral_error = 0;
+    last_millis = millis();
+  
+}
+
+
+//This function prints measurement / demand - Good for visualising the response on the Serial plotter
+void PID::printResponse()
+{
+
+    float response = last_measurement / last_demand;
+    Serial.println(response);
+
+}
+
+
+void PID::setShowResponse(bool state)
+{
+    show_response = state;
+}
+
+
+#endif
+
+#define MOTOR_PWM_L 10
+#define MOTOR_DIR_L 16
+
+#define MOTOR_PWM_R 9
+#define MOTOR_DIR_R 15
+
+#define ENCODER_RIGHT_A_PIN  7
+#define ENCODER_RIGHT_B_PIN  23
+#define ENCODER_LEFT_A_PIN  26
+
+#define LINE_LEFT_PIN A4 //Pin for the left line sensor
+#define LINE_CENTRE_PIN A3 //Pin for the centre line sensor
+#define LINE_RIGHT_PIN A2 //Pin for the right line sensor
+
+#define SHARP_IR_PIN A0 //Pin for the IR Distance sensor
+
+#define YELLOW_LED 13
+#define GREEN_LED 30
+#define RED_LED 17
+
+#define BUTTON_A 14
+#define BUTTON_B 30
+#define BUTTON_C 17
+
+#define BUZZER_PIN 6
+
+#define SS_PIN 4
+#define RST_PIN 5
+
+
+
+// Copyright Pololu Corporation.  For more information, see http://www.pololu.com/
+
+#include "Pushbutton.h"
+
+// \cond
+
+PushbuttonStateMachine::PushbuttonStateMachine()
+{
+  state = 0;
+}
+
+// state 0: The value is considered to be true.
+// state 1: The value was considered to be true, but there
+//   was a recent false reading so it might be falling.
+// state 2: The value is considered to be false.
+// state 3: The value was considered to be false, but there
+//   was a recent true reading so it might be rising.
+//
+// The transition from state 3 to state 0 is the point where we
+// have successfully detected a rising edge an we return true.
+//
+// The prevTimeMillis variable holds the last time that we
+// transitioned to states 1 or 3.
+bool PushbuttonStateMachine::getSingleDebouncedRisingEdge(bool value)
+{
+  uint16_t timeMillis = millis();
+
+  switch (state)
+  {
+  case 0:
+    // If value is false, proceed to the next state.
+    if (!value)
+    {
+      prevTimeMillis = timeMillis;
+      state = 1;
+    }
+    break;
+
+  case 1:
+    if (value)
+    {
+      // The value is true or bouncing, so go back to previous (initial)
+      // state.
+      state = 0;
+    }
+    else if ((uint16_t)(timeMillis - prevTimeMillis) >= 15)
+    {
+      // It has been at least 15 ms and the value is still false, so
+      // proceed to the next state.
+      state = 2;
+    }
+    break;
+
+  case 2:
+    // If the value is true, proceed to the next state.
+    if (value)
+    {
+      prevTimeMillis = timeMillis;
+      state = 3;
+    }
+    break;
+
+  case 3:
+    if (!value)
+    {
+      // The value is false or bouncing, so go back to previous state.
+      state = 2;
+    }
+    else if ((uint16_t)(timeMillis - prevTimeMillis) >= 15)
+    {
+      // It has been at least 15 ms and the value is still true, so
+      // go back to the initial state and report this rising edge.
+      state = 0;
+      return true;
+    }
+    break;
+  }
+
+  return false;
+}
+
+// \endcond
+
+void PushbuttonBase::waitForPress()
+{
+  do
+  {
+    while (!isPressed()); // wait for button to be pressed
+    delay(10);            // debounce the button press
+  }
+  while (!isPressed());   // if button isn't still pressed, loop
+}
+
+void PushbuttonBase::waitForRelease()
+{
+  do
+  {
+    while (isPressed()); // wait for button to be released
+    delay(10);           // debounce the button release
+  }
+  while (isPressed());   // if button isn't still released, loop
+}
+
+void PushbuttonBase::waitForButton()
+{
+  waitForPress();
+  waitForRelease();
+}
+
+bool PushbuttonBase::getSingleDebouncedPress()
+{
+  return pressState.getSingleDebouncedRisingEdge(isPressed());
+}
+
+bool PushbuttonBase::getSingleDebouncedRelease()
+{
+  return releaseState.getSingleDebouncedRisingEdge(!isPressed());
+}
+
+Pushbutton::Pushbutton(uint8_t pin, uint8_t pullUp, uint8_t defaultState)
+{
+  initialized = false;
+  _pin = pin;
+  _pullUp = pullUp;
+  _defaultState = defaultState;
+}
+
+void Pushbutton::init2()
+{
+  if (_pullUp == PULL_UP_ENABLED)
+  {
+    pinMode(_pin, INPUT_PULLUP);
+  }
+  else
+  {
+    pinMode(_pin, INPUT); // high impedance
+  }
+
+  delayMicroseconds(5); // give pull-up time to stabilize
+}
+
+bool Pushbutton::isPressed()
+{
+  init();  // initialize if needed
+  return digitalRead(_pin) != _defaultState;
+}
+
+// Copyright Pololu Corporation.  For more information, see http://www.pololu.com/
+
+/*! \file Pushbutton.h
+ *
+ * This is the main header file for the %Pushbutton library.
+ *
+ * For an overview of the library's features, see
+ * https://github.com/pololu/pushbutton-arduino.  That is the main repository
+ * for the library, though copies of the library may exist in other
+ * repositories. */
+
+#pragma once
+
+#include <Arduino.h>
+
+/*! Indicates the that pull-up resistor should be disabled. */
+#define PULL_UP_DISABLED    0
+
+/*! Indicates the that pull-up resistor should be enabled. */
+#define PULL_UP_ENABLED     1
+
+/*! Indicates that the default (released) state of the button is when the
+ *  I/O line reads low. */
+#define DEFAULT_STATE_LOW   0
+
+/*! Indicates that the default (released) state of the button is when the
+ *  I/O line reads high. */
+#define DEFAULT_STATE_HIGH  1
+
+/*! The pin used for the button on the
+ * [Zumo Shield for Arduino](http://www.pololu.com/product/2508).
+ *
+ * This does not really belong here in this general pushbutton library and will
+ * probably be removed in the future. */
+#define ZUMO_BUTTON 12
+
+// \cond
+/** \brief A state machine that detects when a boolean value changes from false
+ * to true, with debouncing.
+ *
+ * This should be considered a private implementation detail of the library.
+ */
+class PushbuttonStateMachine
+{
+public:
+
+  PushbuttonStateMachine();
+
+  /** This should be called repeatedly in a loop.  It will return true once after
+   * each time it detects the given value changing from false to true. */
+  bool getSingleDebouncedRisingEdge(bool value);
+
+private:
+
+  uint8_t state;
+  uint16_t prevTimeMillis;
+};
+// \endcond
+
+/*! \brief General pushbutton class that handles debouncing.
+ *
+ * This is an abstract class used for interfacing with pushbuttons.  It knows
+ * about debouncing, but it knows nothing about how to read the current state of
+ * the button.  The functions in this class get the current state of the button
+ * by calling isPressed(), a virtual function which must be implemented in a
+ * subclass of PushbuttonBase, such as Pushbutton.
+ *
+ * Most users of this library do not need to directly use PushbuttonBase or even
+ * know that it exists.  They can use Pushbutton instead.*/
+class PushbuttonBase
+{
+public:
+
+  /*! \brief Waits until the button is pressed and takes care of debouncing.
+   *
+   * This function waits until the button is in the pressed state and then
+   * returns.  Note that if the button is already pressed when you call this
+   * function, it will return quickly (in 10 ms). */
+  void waitForPress();
+
+  /*! \brief Waits until the button is released and takes care of debouncing.
+   *
+   * This function waits until the button is in the released state and then
+   * returns.  Note that if the button is already released when you call this
+   * function, it will return quickly (in 10 ms). */
+  void waitForRelease();
+
+  /*! \brief Waits until the button is pressed and then waits until the button
+   *  is released, taking care of debouncing.
+   *
+   * This is equivalent to calling waitForPress() and then waitForRelease(). */
+  void waitForButton();
+
+  /*! \brief Uses a state machine to return true once after each time it detects
+   *  the button moving from the released state to the pressed state.
+   *
+   * This is a non-blocking function that is meant to be called repeatedly in a
+   * loop.  Each time it is called, it updates a state machine that monitors the
+   * state of the button.  When it detects the button changing from the released
+   * state to the pressed state, with debouncing, it returns true. */
+  bool getSingleDebouncedPress();
+
+  /*! \brief Uses a state machine to return true once after each time it detects the button moving from the pressed state to the released state.
+   *
+   * This is just like getSingleDebouncedPress() except it has a separate state
+   * machine and it watches for when the button goes from the pressed state to
+   * the released state.
+   *
+   * There is no strict guarantee that every debounced button press event
+   * returned by getSingleDebouncedPress() will have a corresponding
+   * button release event returned by getSingleDebouncedRelease(); the two
+   * functions use independent state machines and sample the button at different
+   * times. */
+  bool getSingleDebouncedRelease();
+
+  /*! \brief indicates whether button is currently pressed without any debouncing.
+   *
+   * @return 1 if the button is pressed right now, 0 if it is not.
+   *
+   * This function must be implemented in a subclass of PushbuttonBase, such as
+   * Pushbutton. */
+  virtual bool isPressed() = 0;
+
+private:
+
+  PushbuttonStateMachine pressState;
+  PushbuttonStateMachine releaseState;
+};
+
+/** \brief Main class for interfacing with pushbuttons.
+ *
+ * This class can interface with any pushbutton whose state can be read with
+ * the `digitalRead` function, which is part of the Arduino core.
+ *
+ * See https://github.com/pololu/pushbutton-arduino for an overview
+ * of the different ways to use this class. */
+class Pushbutton : public PushbuttonBase
+{
+public:
+
+  /** Constructs a new instance of Pushbutton.
+   *
+   * @param pin The pin number of the pin. This is used as an argument to
+   * `pinMode` and `digitalRead`.
+   *
+   * @param pullUp Specifies whether the pin's internal pull-up resistor should
+   * be enabled.  This should be either #PULL_UP_ENABLED (which is the default if
+   * the argument is omitted) or #PULL_UP_DISABLED.
+   *
+   * @param defaultState Specifies the voltage level that corresponds to the
+   * button's default (released) state.  This should be either
+   * #DEFAULT_STATE_HIGH (which is the default if this argument is omitted) or
+   * #DEFAULT_STATE_LOW. */
+  Pushbutton(uint8_t pin, uint8_t pullUp = PULL_UP_ENABLED,
+      uint8_t defaultState = DEFAULT_STATE_HIGH);
+
+  virtual bool isPressed();
+
+private:
+
+  void init()
+  {
+    if (!initialized)
+    {
+      initialized = true;
+      init2();
+    }
+  }
+
+  void init2();
+
+  bool initialized;
+  uint8_t _pin;
+  bool _pullUp;
+  bool _defaultState;
+};
+
+#ifndef _RF_Interface_h
+#define _RF_Interface_h
+
+#include "RFID.h"
+#include <DigitalIO.h>
+ 
+RFID rfid(SS_PIN, RST_PIN); //create an instance rfid for the class RFID
+const int KEY_SIZE = 6;
+unsigned char Key[KEY_SIZE];
+unsigned long RFID;
+
+/* This is where we define the RFID card lookup table
+ *  Make sure to update the values here to match the setup of the map
+ */
+#define NUM_CARDS 3
+float x_poses[NUM_CARDS] = {100, 150, 960};
+float y_poses[NUM_CARDS] = {300, 450, 100};
+float bearing[NUM_CARDS] = {PI, PI/4, -PI};
+char serials[NUM_CARDS] =  {137, 169, 224};
+
+void setupRFID()
+{
+  
+    rfid.init();
+
+    for (int i=0;i<KEY_SIZE;i++)
+    {
+        Key[i] = 0xFF;
+    }
+
+}
+
+bool checkForRFID()
+{
+
+    bool found=false;
+    //Serial.println(F("Checking"));
+    if (rfid.isCard())
+    {
+      
+        //Serial.println(F("Got a card"));
+    
+        if (rfid.readCardSerial())
+        {
+            for (int i=0; i<=4; i++)//card value: "xyz xyz xyz xyz xyz" (15 digits maximum; 5 pairs of xyz)hence 0<=i<=4 //
+            {
+                //Serial.print(rfid.serNum[i]);
+            }
+      
+            found=true;
+            //Serial.println("");
+        }
+    }
+
+    return found;
+
+}
+
+float serialToXPos(char * serNum)
+{
+    for (int i=0;i<NUM_CARDS;i++)
+    {
+      if(serNum[0] == serials[i])
+      {
+        return x_poses[i];
+      }
+    }
+
+    Serial.println(F("Error: Card not found"));
+    
+    return -1;
+}
+
+float serialToYPos(char * serNum)
+{
+    for (int i=0;i<NUM_CARDS;i++)
+    {
+        if(serNum[0] == serials[i])
+        {
+          return y_poses[i];
+        }
+    }
+
+    Serial.println(F("Error: Card not found"));
+    
+    return -1;
+}
+float serialToBearing(char * serNum)
+{
+    for (int i=0;i<NUM_CARDS;i++)
+    {
+        if(serNum[0] == serials[i])
+        {
+          return y_poses[i];
+        }
+    }
+
+    Serial.println(F("Error: Card not found"));
+    
+    return -1;
+}
+
+
+#endif
+
+/*
+ * RFID.cpp - Library to use ARDUINO RFID MODULE KIT 13.56 MHZ WITH TAGS SPI W AND R BY COOQROBOT.
+ * Based on code Dr.Leong   ( WWW.B2CQSHOP.COM )
+ * Created by Miguel Balboa, Jan, 2012.
+ * modified and improved by Abhay.S.Bharadwaj (abhaysbharadwaj@gmail.com) & Anirban chowdhury
+ * added: SOFTWARE SPI functionality (December,2015)
+ * Released into the public domain.
+ */
+
+/******************************************************************************
+ * Includes
+ ******************************************************************************/
+#include <Arduino.h>
+#include "DigitalIO.h"
+#include "RFID.h"
+
+/******************************************************************************
+ * User API
+ ******************************************************************************/
+
+/**
+ * Construct RFID
+ * int chipSelectPin RFID /ENABLE pin
+ */
+const uint8_t SOFT_SPI_MISO_PIN = 12; // user defined pin
+const uint8_t SOFT_SPI_MOSI_PIN = 14; // user defined pin
+const uint8_t SOFT_SPI_SCK_PIN  = 11; // user defined pin
+const uint8_t SPI_MODE = 0;
+SoftSPI<SOFT_SPI_MISO_PIN, SOFT_SPI_MOSI_PIN, SOFT_SPI_SCK_PIN, SPI_MODE> spi;
+
+RFID::RFID(int chipSelectPin, int NRSTPD)
+{
+    spi.begin(); 
+	_chipSelectPin = chipSelectPin;
+	
+  pinMode(_chipSelectPin,OUTPUT);			// Set digital as OUTPUT to connect it to the RFID /ENABLE pin 
+  digitalWrite(_chipSelectPin, LOW); 
+  
+  
+  pinMode(NRSTPD,OUTPUT);					// Set digital pin, Not Reset and Power-down
+  digitalWrite(NRSTPD, HIGH);
+  _NRSTPD = NRSTPD;
+}
+/******************************************************************************
+ * User API
+ ******************************************************************************/
+
+ bool RFID::isCard() 
+ {
+	unsigned char status;
+	unsigned char str[MAX_LEN];
+	
+	status = MFRC522Request(PICC_REQIDL, str);	
+    if (status == MI_OK) {
+		return true;
+	} else { 
+		return false; 
+	}
+ }
+ 
+ bool RFID::readCardSerial(){
+	
+	unsigned char status;
+	unsigned char str[MAX_LEN];
+	
+	// Anti-colisiï¿½n, devuelva el nï¿½mero de serie de tarjeta de 4 bytes
+	status = anticoll(str);
+	memcpy(serNum, str, 5);
+	
+	if (status == MI_OK) {
+		return true;
+	} else {
+		return false;
+	}
+ 
+ }
+
+/******************************************************************************
+ * Dr.Leong   ( WWW.B2CQSHOP.COM )
+ ******************************************************************************/
+
+void RFID::init()
+{
+    digitalWrite(_NRSTPD,HIGH);
+
+	reset();
+	 	
+	//Timer: TPrescaler*TreloadVal/6.78MHz = 24ms
+    writeMFRC522(TModeReg, 0x8D);		//Tauto=1; f(Timer) = 6.78MHz/TPreScaler
+    writeMFRC522(TPrescalerReg, 0x3E);	//TModeReg[3..0] + TPrescalerReg
+    writeMFRC522(TReloadRegL, 30);           
+    writeMFRC522(TReloadRegH, 0);
+	
+	writeMFRC522(TxAutoReg, 0x40);		//100%ASK
+	writeMFRC522(ModeReg, 0x3D);		// CRC valor inicial de 0x6363
+
+	//ClearBitMask(Status2Reg, 0x08);	//MFCrypto1On=0
+	//writeMFRC522(RxSelReg, 0x86);		//RxWait = RxSelReg[5..0]
+	//writeMFRC522(RFCfgReg, 0x7F);   	//RxGain = 48dB
+
+	antennaOn();		//Abre  la antena
+	
+	
+}
+void RFID::reset()
+{
+	writeMFRC522(CommandReg, PCD_RESETPHASE);
+}
+
+void RFID::writeMFRC522(unsigned char addr, unsigned char val)
+{
+	digitalWrite(_chipSelectPin, LOW);
+
+	//0XXXXXX0 formato de direcciï¿½n
+	spi.transfer((addr<<1)&0x7E);	
+	spi.transfer(val);
+	
+	digitalWrite(_chipSelectPin, HIGH);
+}
+
+void RFID::antennaOn(void)
+{
+	unsigned char temp;
+
+	temp = readMFRC522(TxControlReg);
+	if (!(temp & 0x03))
+	{
+		setBitMask(TxControlReg, 0x03);
+	}
+}
+
+/*
+ *  Read_MFRC522 Nombre de la funciï¿½n: Read_MFRC522
+ *  Descripciï¿½n: Desde el MFRC522 leer un byte de un registro de datos
+ *  Los parï¿½metros de entrada: addr - la direcciï¿½n de registro
+ *  Valor de retorno: Devuelve un byte de datos de lectura
+ */
+unsigned char RFID::readMFRC522(unsigned char addr)
+{
+	unsigned char val;
+	digitalWrite(_chipSelectPin, LOW);
+	spi.transfer(((addr<<1)&0x7E) | 0x80);	
+	val =spi.transfer(0x00);
+	digitalWrite(_chipSelectPin, HIGH);
+	return val;	
+}
+
+void RFID::setBitMask(unsigned char reg, unsigned char mask)  
+{ 
+    unsigned char tmp;
+    tmp = readMFRC522(reg);
+    writeMFRC522(reg, tmp | mask);  // set bit mask
+}
+
+void RFID::clearBitMask(unsigned char reg, unsigned char mask)  
+{
+    unsigned char tmp;
+    tmp = readMFRC522(reg);
+    writeMFRC522(reg, tmp & (~mask));  // clear bit mask
+} 
+
+void RFID::calculateCRC(unsigned char *pIndata, unsigned char len, unsigned char *pOutData)
+{
+    unsigned char i, n;
+
+    clearBitMask(DivIrqReg, 0x04);			//CRCIrq = 0
+    setBitMask(FIFOLevelReg, 0x80);			//Claro puntero FIFO
+    //Write_MFRC522(CommandReg, PCD_IDLE);
+
+	//Escribir datos en el FIFO	
+    for (i=0; i<len; i++)
+    {   
+		writeMFRC522(FIFODataReg, *(pIndata+i));   
+	}
+    writeMFRC522(CommandReg, PCD_CALCCRC);
+
+	// Esperar a la finalizaciï¿½n de cï¿½lculo del CRC
+    i = 0xFF;
+    do 
+    {
+        n = readMFRC522(DivIrqReg);
+        i--;
+    }
+    while ((i!=0) && !(n&0x04));			//CRCIrq = 1
+
+	//Lea el cï¿½lculo de CRC
+    pOutData[0] = readMFRC522(CRCResultRegL);
+    pOutData[1] = readMFRC522(CRCResultRegM);
+}
+
+unsigned char RFID::MFRC522ToCard(unsigned char command, unsigned char *sendData, unsigned char sendLen, unsigned char *backData, unsigned int *backLen)
+{
+    unsigned char status = MI_ERR;
+    unsigned char irqEn = 0x00;
+    unsigned char waitIRq = 0x00;
+	unsigned char lastBits;
+    unsigned char n;
+    unsigned int i;
+
+    switch (command)
+    {
+        case PCD_AUTHENT:		// Tarjetas de certificaciï¿½n cerca
+		{
+			irqEn = 0x12;
+			waitIRq = 0x10;
+			break;
+		}
+		case PCD_TRANSCEIVE:	//La transmisiï¿½n de datos FIFO
+		{
+			irqEn = 0x77;
+			waitIRq = 0x30;
+			break;
+		}
+		default:
+			break;
+    }
+   
+    writeMFRC522(CommIEnReg, irqEn|0x80);	//De solicitud de interrupciï¿½n
+    clearBitMask(CommIrqReg, 0x80);			// Borrar todos los bits de peticiï¿½n de interrupciï¿½n
+    setBitMask(FIFOLevelReg, 0x80);			//FlushBuffer=1, FIFO de inicializaciï¿½n
+    
+	writeMFRC522(CommandReg, PCD_IDLE);	//NO action;Y cancelar el comando
+
+	//Escribir datos en el FIFO
+    for (i=0; i<sendLen; i++)
+    {   
+		writeMFRC522(FIFODataReg, sendData[i]);    
+	}
+
+	//???? ejecutar el comando
+	writeMFRC522(CommandReg, command);
+    if (command == PCD_TRANSCEIVE)
+    {    
+		setBitMask(BitFramingReg, 0x80);		//StartSend=1,transmission of data starts  
+	}   
+    
+	// A la espera de recibir datos para completar
+	i = 2000;	//i????????,??M1???????25ms	??? i De acuerdo con el ajuste de frecuencia de reloj, el tiempo mï¿½ximo de espera operaciï¿½n M1 25ms tarjeta??
+    do 
+    {
+		//CommIrqReg[7..0]
+		//Set1 TxIRq RxIRq IdleIRq HiAlerIRq LoAlertIRq ErrIRq TimerIRq
+        n = readMFRC522(CommIrqReg);
+        i--;
+    }
+    while ((i!=0) && !(n&0x01) && !(n&waitIRq));
+
+    clearBitMask(BitFramingReg, 0x80);			//StartSend=0
+	
+    if (i != 0)
+    {    
+        if(!(readMFRC522(ErrorReg) & 0x1B))	//BufferOvfl Collerr CRCErr ProtecolErr
+        {
+            status = MI_OK;
+            if (n & irqEn & 0x01)
+            {   
+				status = MI_NOTAGERR;			//??   
+			}
+
+            if (command == PCD_TRANSCEIVE)
+            {
+               	n = readMFRC522(FIFOLevelReg);
+              	lastBits = readMFRC522(ControlReg) & 0x07;
+                if (lastBits)
+                {   
+					*backLen = (n-1)*8 + lastBits;   
+				}
+                else
+                {   
+					*backLen = n*8;   
+				}
+
+                if (n == 0)
+                {   
+					n = 1;    
+				}
+                if (n > MAX_LEN)
+                {   
+					n = MAX_LEN;   
+				}
+				
+				//??FIFO??????? Lea los datos recibidos en el FIFO
+                for (i=0; i<n; i++)
+                {   
+					backData[i] = readMFRC522(FIFODataReg);    
+				}
+            }
+        }
+        else
+        {   
+			status = MI_ERR;  
+		}
+        
+    }
+	
+    //SetBitMask(ControlReg,0x80);           //timer stops
+    //Write_MFRC522(CommandReg, PCD_IDLE); 
+
+    return status;
+}
+
+
+/*
+ *  Nombre de la funciï¿½n: MFRC522_Request
+ *  Descripciï¿½n: Buscar las cartas, leer el nï¿½mero de tipo de tarjeta
+ *  Los parï¿½metros de entrada: reqMode - encontrar el modo de tarjeta,
+ *			   Tagtype - Devuelve el tipo de tarjeta
+ *			 	0x4400 = Mifare_UltraLight
+ *				0x0400 = Mifare_One(S50)
+ *				0x0200 = Mifare_One(S70)
+ *				0x0800 = Mifare_Pro(X)
+ *				0x4403 = Mifare_DESFire
+ *  Valor de retorno: el retorno exitoso MI_OK
+ */
+unsigned char  RFID::MFRC522Request(unsigned char reqMode, unsigned char *TagType)
+{
+	unsigned char status;  
+	unsigned int backBits;			//   Recibiï¿½ bits de datos
+
+	writeMFRC522(BitFramingReg, 0x07);		//TxLastBists = BitFramingReg[2..0]	???
+	
+	TagType[0] = reqMode;
+	status = MFRC522ToCard(PCD_TRANSCEIVE, TagType, 1, TagType, &backBits);
+
+	if ((status != MI_OK) || (backBits != 0x10))
+	{    
+		status = MI_ERR;
+	}
+   
+	return status;
+}
+
+/**
+ *  MFRC522Anticoll -> anticoll
+ *  Anti-detecciï¿½n de colisiones, la lectura del nï¿½mero de serie de la tarjeta de tarjeta
+ *  @param serNum - devuelve el nï¿½mero de tarjeta 4 bytes de serie, los primeros 5 bytes de bytes de paridad
+ *  @return retorno exitoso MI_OK
+ */
+unsigned char RFID::anticoll(unsigned char *serNum)
+{
+    unsigned char status;
+    unsigned char i;
+	unsigned char serNumCheck=0;
+    unsigned int unLen;
+    
+
+    //ClearBitMask(Status2Reg, 0x08);		//TempSensclear
+    //ClearBitMask(CollReg,0x80);			//ValuesAfterColl
+	writeMFRC522(BitFramingReg, 0x00);		//TxLastBists = BitFramingReg[2..0]
+ 
+    serNum[0] = PICC_ANTICOLL;
+    serNum[1] = 0x20;
+    status = MFRC522ToCard(PCD_TRANSCEIVE, serNum, 2, serNum, &unLen);
+
+    if (status == MI_OK)
+	{
+		//?????? Compruebe el nï¿½mero de serie de la tarjeta
+		for (i=0; i<4; i++)
+		{   
+		 	serNumCheck ^= serNum[i];
+		}
+		if (serNumCheck != serNum[i])
+		{   
+			status = MI_ERR;    
+		}
+    }
+
+    //SetBitMask(CollReg, 0x80);		//ValuesAfterColl=1
+
+    return status;
+}
+
+/* 
+ * MFRC522Auth -> auth
+ * Verificar la contraseï¿½a de la tarjeta
+ * Los parï¿½metros de entrada: AuthMode - Modo de autenticaciï¿½n de contraseï¿½a
+                 0x60 = A 0x60 = validaciï¿½n KeyA
+                 0x61 = B 0x61 = validaciï¿½n KeyB
+             BlockAddr--  bloque de direcciones
+             Sectorkey-- sector contraseï¿½a
+             serNum--,4? Tarjeta de nï¿½mero de serie, 4 bytes
+ * MI_OK Valor de retorno: el retorno exitoso MI_OK
+ */
+unsigned char RFID::auth(unsigned char authMode, unsigned char BlockAddr, unsigned char *Sectorkey, unsigned char *serNum)
+{
+    unsigned char status;
+    unsigned int recvBits;
+    unsigned char i;
+	unsigned char buff[12]; 
+
+	//????+???+????+???? Verifique la direcciï¿½n de comandos de bloques del sector + + contraseï¿½a + nï¿½mero de la tarjeta de serie
+    buff[0] = authMode;
+    buff[1] = BlockAddr;
+    for (i=0; i<6; i++)
+    {    
+		buff[i+2] = *(Sectorkey+i);   
+	}
+    for (i=0; i<4; i++)
+    {    
+		buff[i+8] = *(serNum+i);   
+	}
+    status = MFRC522ToCard(PCD_AUTHENT, buff, 12, buff, &recvBits);
+
+    if ((status != MI_OK) || (!(readMFRC522(Status2Reg) & 0x08)))
+    {   
+		status = MI_ERR;   
+	}
+    
+    return status;
+}
+
+/*
+ * MFRC522Read -> read
+ * Lectura de datos de bloque
+ * Los parï¿½metros de entrada: blockAddr - direcciï¿½n del bloque; recvData - leer un bloque de datos
+ * MI_OK Valor de retorno: el retorno exitoso MI_OK
+ */
+unsigned char RFID::read(unsigned char blockAddr, unsigned char *recvData)
+{
+    unsigned char status;
+    unsigned int unLen;
+
+    recvData[0] = PICC_READ;
+    recvData[1] = blockAddr;
+    calculateCRC(recvData,2, &recvData[2]);
+    status = MFRC522ToCard(PCD_TRANSCEIVE, recvData, 4, recvData, &unLen);
+
+    if ((status != MI_OK) || (unLen != 0x90))
+    {
+        status = MI_ERR;
+    }
+    
+    return status;
+}
+
+/*
+ * MFRC522Write -> write
+ * La escritura de datos de bloque
+ * blockAddr - direcciï¿½n del bloque; WriteData - para escribir 16 bytes del bloque de datos
+ * Valor de retorno: el retorno exitoso MI_OK
+ */
+unsigned char RFID::write(unsigned char blockAddr, unsigned char *writeData)
+{
+    unsigned char status;
+    unsigned int recvBits;
+    unsigned char i;
+	unsigned char buff[18]; 
+    
+    buff[0] = PICC_WRITE;
+    buff[1] = blockAddr;
+    calculateCRC(buff, 2, &buff[2]);
+    status = MFRC522ToCard(PCD_TRANSCEIVE, buff, 4, buff, &recvBits);
+
+    if ((status != MI_OK) || (recvBits != 4) || ((buff[0] & 0x0F) != 0x0A))
+    {   
+		status = MI_ERR;   
+	}
+        
+    if (status == MI_OK)
+    {
+        for (i=0; i<16; i++)		//?FIFO?16Byte?? Datos a la FIFO 16Byte escribir
+        {    
+        	buff[i] = *(writeData+i);   
+        }
+        calculateCRC(buff, 16, &buff[16]);
+        status = MFRC522ToCard(PCD_TRANSCEIVE, buff, 18, buff, &recvBits);
+        
+		if ((status != MI_OK) || (recvBits != 4) || ((buff[0] & 0x0F) != 0x0A))
+        {   
+			status = MI_ERR;   
+		}
+    }
+    
+    return status;
+}
+
+
+/*
+ * MFRC522Halt -> halt
+ * Cartas de Mando para dormir
+ * Los parï¿½metros de entrada: Ninguno
+ * Valor devuelto: Ninguno
+ */
+void RFID::halt()
+{
+	unsigned char status;
+    unsigned int unLen;
+    unsigned char buff[4]; 
+
+    buff[0] = PICC_HALT;
+    buff[1] = 0;
+    calculateCRC(buff, 2, &buff[2]);
+ 
+    status = MFRC522ToCard(PCD_TRANSCEIVE, buff, 4, buff,&unLen);
+}
+
+/* RFID.h - Library to use ARDUINO RFID MODULE KIT 13.56 MHZ WITH TAGS SPI W AND R BY COOQROBOT.
+ * Based on code Dr.Leong   ( WWW.B2CQSHOP.COM )
+ * Created by Miguel Balboa (circuitito.com), Jan, 2012.
+ * modified and improved by Abhay.S.Bharadwaj (abhaysbharadwaj@gmail.com) & Anirban chowdhury
+ * added: SOFTWARE SPI functionality (December,2015)
+ */
+#ifndef RFID_h
+#define RFID_h
+
+#include <Arduino.h>
+#include <SPI.h>
+#include "DigitalIO.h"
+
+
+/******************************************************************************
+ * Definitions
+ ******************************************************************************/
+#define MAX_LEN 16   // Largo mï¿½ximo de la matriz
+
+//MF522 comando palabra
+#define PCD_IDLE              0x00               // NO action; Y cancelar el comando
+#define PCD_AUTHENT           0x0E               // autenticaciï¿½n de clave
+#define PCD_RECEIVE           0x08               // recepciï¿½n de datos
+#define PCD_TRANSMIT          0x04               // Enviar datos
+#define PCD_TRANSCEIVE        0x0C               // Enviar y recibir datos
+#define PCD_RESETPHASE        0x0F               // reajustar
+#define PCD_CALCCRC           0x03               // CRC calcular
+
+//Mifare_One  Tarjeta Mifare_One comando palabra
+#define PICC_REQIDL           0x26               // ï¿½rea de la antena no estï¿½ tratando de entrar en el estado de reposo
+#define PICC_REQALL           0x52               // Todas las cartas para encontrar el ï¿½rea de la antena
+#define PICC_ANTICOLL         0x93               // anti-colisiï¿½n
+#define PICC_SElECTTAG        0x93               // elecciï¿½n de tarjeta
+#define PICC_AUTHENT1A        0x60               // verificaciï¿½n key A
+#define PICC_AUTHENT1B        0x61               // verificaciï¿½n Key B
+#define PICC_READ             0x30               // leer bloque
+#define PICC_WRITE            0xA0               // Escribir en el bloque 
+#define PICC_DECREMENT        0xC0               // cargo
+#define PICC_INCREMENT        0xC1               // recargar
+#define PICC_RESTORE          0xC2               // Transferencia de datos de bloque de buffer
+#define PICC_TRANSFER         0xB0               // Guardar los datos en el bï¿½fer
+#define PICC_HALT             0x50               // inactividad
+
+//MF522 Cï¿½digo de error de comunicaciï¿½n cuando regresï¿½
+#define MI_OK                 0
+#define MI_NOTAGERR           1
+#define MI_ERR                2
+
+//------------------ MFRC522 registro---------------
+//Page 0:Command and Status
+#define     Reserved00            0x00    
+#define     CommandReg            0x01    
+#define     CommIEnReg            0x02    
+#define     DivlEnReg             0x03    
+#define     CommIrqReg            0x04    
+#define     DivIrqReg             0x05
+#define     ErrorReg              0x06    
+#define     Status1Reg            0x07    
+#define     Status2Reg            0x08    
+#define     FIFODataReg           0x09
+#define     FIFOLevelReg          0x0A
+#define     WaterLevelReg         0x0B
+#define     ControlReg            0x0C
+#define     BitFramingReg         0x0D
+#define     CollReg               0x0E
+#define     Reserved01            0x0F
+//Page 1:Command     
+#define     Reserved10            0x10
+#define     ModeReg               0x11
+#define     TxModeReg             0x12
+#define     RxModeReg             0x13
+#define     TxControlReg          0x14
+#define     TxAutoReg             0x15
+#define     TxSelReg              0x16
+#define     RxSelReg              0x17
+#define     RxThresholdReg        0x18
+#define     DemodReg              0x19
+#define     Reserved11            0x1A
+#define     Reserved12            0x1B
+#define     MifareReg             0x1C
+#define     Reserved13            0x1D
+#define     Reserved14            0x1E
+#define     SerialSpeedReg        0x1F
+//Page 2:CFG    
+#define     Reserved20            0x20  
+#define     CRCResultRegM         0x21
+#define     CRCResultRegL         0x22
+#define     Reserved21            0x23
+#define     ModWidthReg           0x24
+#define     Reserved22            0x25
+#define     RFCfgReg              0x26
+#define     GsNReg                0x27
+#define     CWGsPReg	          0x28
+#define     ModGsPReg             0x29
+#define     TModeReg              0x2A
+#define     TPrescalerReg         0x2B
+#define     TReloadRegH           0x2C
+#define     TReloadRegL           0x2D
+#define     TCounterValueRegH     0x2E
+#define     TCounterValueRegL     0x2F
+//Page 3:TestRegister     
+#define     Reserved30            0x30
+#define     TestSel1Reg           0x31
+#define     TestSel2Reg           0x32
+#define     TestPinEnReg          0x33
+#define     TestPinValueReg       0x34
+#define     TestBusReg            0x35
+#define     AutoTestReg           0x36
+#define     VersionReg            0x37
+#define     AnalogTestReg         0x38
+#define     TestDAC1Reg           0x39  
+#define     TestDAC2Reg           0x3A   
+#define     TestADCReg            0x3B   
+#define     Reserved31            0x3C   
+#define     Reserved32            0x3D   
+#define     Reserved33            0x3E   
+#define     Reserved34			  0x3F
+//-----------------------------------------------
+
+class RFID
+{
+  public:
+    RFID(int chipSelectPin, int NRSTPD);
+	
+	bool isCard();
+	bool readCardSerial();
+	
+    void init();
+	void reset();
+	void writeMFRC522(unsigned char addr, unsigned char val);
+	void antennaOn(void);
+	unsigned char readMFRC522(unsigned char addr);
+	void setBitMask(unsigned char reg, unsigned char mask);
+	void clearBitMask(unsigned char reg, unsigned char mask);
+	void calculateCRC(unsigned char *pIndata, unsigned char len, unsigned char *pOutData);
+	unsigned char MFRC522Request(unsigned char reqMode, unsigned char *TagType);
+	unsigned char MFRC522ToCard(unsigned char command, unsigned char *sendData, unsigned char sendLen, unsigned char *backData, unsigned int *backLen);
+	unsigned char anticoll(unsigned char *serNum);
+	unsigned char auth(unsigned char authMode, unsigned char BlockAddr, unsigned char *Sectorkey, unsigned char *serNum);
+	unsigned char read(unsigned char blockAddr, unsigned char *recvData);
+	unsigned char write(unsigned char blockAddr, unsigned char *writeData);
+	void halt();
+	
+	unsigned char serNum[5];       // Constante para guardar el numero de serie leido.
+	unsigned char AserNum[5];      // Constante para guardar el numero d serie de la secion actual.
+	
+  private:
+    int _chipSelectPin;
+	int _NRSTPD;
+	
+};
+
+#endif
+
+// Copyright Pololu Corporation.  For more information, see http://www.pololu.com/
+
+/** \file Romi32U4Buttons.h **/
+
+#pragma once
+
+#include <Pushbutton.h>
+#include <FastGPIO.h>
+#include <USBPause.h>
+#include <util/delay.h>
+
+/*! The pin number for the pin connected to button A on the Romi 32U4. */
+#define ROMI_32U4_BUTTON_A 14
+
+/*! The pin number for the pin connected to button B on the Romi 32U4.  Note
+ * that this is not an official Arduino pin number so it cannot be used with
+ * functions like digitalRead, but it can be used with the FastGPIO library. */
+#define ROMI_32U4_BUTTON_B IO_D5
+
+/*! The pin number for the pin conencted to button C on the Romi 32U4. */
+#define ROMI_32U4_BUTTON_C 17
+
+/*! \brief Interfaces with button A on the Romi 32U4. */
+class Romi32U4ButtonA : public Pushbutton
+{
+public:
+    Romi32U4ButtonA() : Pushbutton(ROMI_32U4_BUTTON_A)
+    {
+    }
+};
+
+/*! \brief Interfaces with button B on the Romi 32U4.
+ *
+ * The pin used for button B is also used for the TX LED.
+ *
+ * This class temporarily disables USB interrupts because the Arduino core code
+ * has USB interrupts enabled that sometimes write to the pin this button is on.
+ *
+ * This class temporarily sets the pin to be an input without a pull-up
+ * resistor.  The pull-up resistor is not needed because of the resistors on the
+ * board. */
+class Romi32U4ButtonB : public PushbuttonBase
+{
+public:
+
+    virtual bool isPressed()
+    {
+        USBPause usbPause;
+        FastGPIO::PinLoan<ROMI_32U4_BUTTON_B> loan;
+        FastGPIO::Pin<ROMI_32U4_BUTTON_B>::setInputPulledUp();
+        _delay_us(3);
+        return !FastGPIO::Pin<ROMI_32U4_BUTTON_B>::isInputHigh();
+    }
+};
+
+/*! \brief Interfaces with button C on the Romi 32U4.
+ *
+ * The pin used for button C is also used for the RX LED.
+ *
+ * This class temporarily disables USB interrupts because the Arduino core code
+ * has USB interrupts enabled that sometimes write to the pin this button is on.
+ *
+ * This class temporarily sets the pin to be an input without a pull-up
+ * resistor.  The pull-up resistor is not needed because of the resistors on the
+ * board. */
+class Romi32U4ButtonC : public PushbuttonBase
+{
+public:
+
+    virtual bool isPressed()
+    {
+        USBPause usbPause;
+        FastGPIO::PinLoan<ROMI_32U4_BUTTON_C> loan;
+        FastGPIO::Pin<ROMI_32U4_BUTTON_C>::setInputPulledUp();
+        _delay_us(3);
+        return !FastGPIO::Pin<ROMI_32U4_BUTTON_C>::isInputHigh();
+    }
+};
+
+float rad2deg(float rad)
+{
+    return rad * (180.0 / PI);
+}
+
+float deg2rad(float deg)
+{
+	  return deg * (PI/ 180.0);
+}
+
+
+/*
+ *  This is quite a computationally expensive routine,
+ *  so you might want to consider not using it.  But 
+ *  gaussian random numbers are really nice for a random
+ *  walk behaviour :)
+ *  From: http://www.taygeta.com/random/gaussian.html
+ */
+float randGaussian( float mean, float sd ) {
+   float x1, x2, w, y;
+   
+   do {
+     // Adaptation here because arduino random() returns a long
+     x1 = random(0,2000) - 1000;
+     x1 *= 0.001;
+     x2 = random(0,2000) - 1000;
+     x2 *= 0.001;
+     w = (x1 * x1) + (x2 * x2); 
+     
+   } while( w >= 1.0 );
+   
+   w = sqrt( (-2.0 * log( w ) )/w );
+   y = x1 * w;
+   
+   return mean + y * sd;
+   
+}
